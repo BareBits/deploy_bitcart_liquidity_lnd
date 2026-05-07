@@ -50,7 +50,11 @@ export BTC_LIGHTNING_LISTEN=0.0.0.0:9735
 export BITCART_ADDITIONAL_COMPONENTS=btc-ln
 export BTC_LIGHTNING_GOSSIP=true
 export BITCARTGEN_DOCKER_IMAGE=bitcart/docker-compose-generator:local
-export BITCART_BITCOIN_EXPOSE=true
+# Do not publish the btc daemon's port 5000 to the host — Docker bypasses
+# ufw, so a published port is internet-reachable regardless of firewall
+# rules. The bitcart backend talks to the daemon over the docker network
+# at http://bitcoin:5000, so external publishing serves no purpose.
+#export BITCART_BITCOIN_EXPOSE=true
 export BTC_DEBUG=true
 export ALLOW_INCOMING_CHANNELS=true
 
