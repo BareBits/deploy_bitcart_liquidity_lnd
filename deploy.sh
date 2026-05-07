@@ -62,8 +62,16 @@ export ALLOW_INCOMING_CHANNELS=true
 : "${BTCLND_LND_EXTRA_ARGS:=}"
 : "${BTCLND_EXTERNAL_IP:=}"
 : "${BTCLND_LND_BINARY:=}"
+# BTCLND p2p port pool. Defaults give 20 wallets at 9755-9774, skipping
+# 9735 which the electrum btc daemon already publishes. To enlarge the
+# pool, raise BTCLND_P2P_POOL_SIZE; the firewall rule and the docker
+# port mapping are derived below so they stay aligned.
+: "${BTCLND_BASE_P2P_PORT:=9755}"
+: "${BTCLND_P2P_POOL_SIZE:=20}"
+export BTCLND_P2P_PORT_RANGE_END=$((BTCLND_BASE_P2P_PORT + BTCLND_P2P_POOL_SIZE - 1))
 export BTCLND_NETWORK BTCLND_DEBUG BTCLND_TOR BTCLND_NEUTRINO_PEERS
 export BTCLND_LND_EXTRA_ARGS BTCLND_EXTERNAL_IP BTCLND_LND_BINARY
+export BTCLND_BASE_P2P_PORT
 
 export SMTP_FROM_EMAIL=$BITCART_ADMIN_EMAIL
 export SMTP_TO_EMAIL=$BITCART_ADMIN_EMAIL
@@ -82,8 +90,10 @@ ufw allow 443/tcp
 ufw allow 3000/tcp
 ufw allow 4000/tcp
 ufw allow 8000/tcp
-# lightning
+# lightning (electrum btc daemon)
 ufw allow 9735/tcp
+# lightning (BTCLND wallets — one port per LND instance, see BTCLND_*_PORT vars above)
+ufw allow "$BTCLND_BASE_P2P_PORT:$BTCLND_P2P_PORT_RANGE_END/tcp"
 # electrum
 ufw deny 5000/tcp
 ufw reload
