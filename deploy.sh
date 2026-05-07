@@ -10,7 +10,7 @@ set -e
 : "${CASHOUT_LIGHTNING_ADDRESS?Error: CASHOUT_LIGHTNING_ADDRESS environment variable is not set}"
 
 # Some environment vars you need to set prior to calling the script
-# Critical settings, must be included 
+# Critical settings, must be included
 #export BITCART_HOST=myhost.mywebsite.com
 #export BITCART_ADMIN_EMAIL=somebody@website.com
 #export BITCART_ADMIN_PASSWORD=mypassword
@@ -23,17 +23,48 @@ set -e
 #export SMTP_USERNAME=''
 #export SMTP_PASSWORD=''
 
-# other settings
-export BITCART_CRYPTOS=btc
+# Source repos for the bitcart-docker source-build path. Override any of
+# these to deploy from a different fork or branch. Note: the SDK source
+# is pinned in the bitcart fork's pyproject.toml, not here.
+: "${BITCART_REPO_URL:=https://github.com/BareBits/bitcart.git}"
+: "${BITCART_REPO_BRANCH:=lnd-integration}"
+: "${BITCART_ADMIN_REPO_URL:=https://github.com/BareBits/bitcart-admin.git}"
+: "${BITCART_ADMIN_REPO_BRANCH:=lnd-integration}"
+: "${BITCART_DOCKER_REPO_URL:=https://github.com/BareBits/bitcart-docker-lnd.git}"
+: "${BITCART_DOCKER_REPO_BRANCH:=master}"
+: "${LIQUIDITYHELPER_REPO_URL:=https://github.com/BareBits/bitcart_liquidity.git}"
+: "${LIQUIDITYHELPER_REPO_BRANCH:=main}"
+export BITCART_REPO_URL BITCART_REPO_BRANCH
+export BITCART_ADMIN_REPO_URL BITCART_ADMIN_REPO_BRANCH
+
+# Enable the source-build path in bitcart-docker — clones the forks above
+# at deploy time and rebuilds the bitcart/* :stable images locally.
+export BITCART_SOURCE_BUILD=true
+
+# Coin daemons. btc = electrum-based, btclnd = LND neutrino-based.
+# Both run alongside each other.
+export BITCART_CRYPTOS=btc,btclnd
 export BTC_LIGHTNING=True
 export BTC_LIGHTNING_LISTEN=0.0.0.0:9735
 # used to include tor here but no longer do because it broke setup process
 export BITCART_ADDITIONAL_COMPONENTS=btc-ln
-export BTC_LIGHTNING_GOSSIP=true 
+export BTC_LIGHTNING_GOSSIP=true
 export BITCARTGEN_DOCKER_IMAGE=bitcart/docker-compose-generator:local
 export BITCART_BITCOIN_EXPOSE=true
 export BTC_DEBUG=true
 export ALLOW_INCOMING_CHANNELS=true
+
+# BTCLND daemon configuration. All env-overridable.
+: "${BTCLND_NETWORK:=mainnet}"
+: "${BTCLND_DEBUG:=false}"
+: "${BTCLND_TOR:=auto}"
+: "${BTCLND_NEUTRINO_PEERS:=}"
+: "${BTCLND_LND_EXTRA_ARGS:=}"
+: "${BTCLND_EXTERNAL_IP:=}"
+: "${BTCLND_LND_BINARY:=}"
+export BTCLND_NETWORK BTCLND_DEBUG BTCLND_TOR BTCLND_NEUTRINO_PEERS
+export BTCLND_LND_EXTRA_ARGS BTCLND_EXTERNAL_IP BTCLND_LND_BINARY
+
 export SMTP_FROM_EMAIL=$BITCART_ADMIN_EMAIL
 export SMTP_TO_EMAIL=$BITCART_ADMIN_EMAIL
 
@@ -58,22 +89,40 @@ ufw deny 5000/tcp
 ufw reload
 
 # install bitcart
-apt-get update && apt-get install -y git htop iotop python3-venv
+apt-get update && apt-get install -y git htop iotop python3-venv rsync
 mkdir -p /opt
 cd /opt
-if [ -d "bitcart-docker" ]; then echo "existing bitcart-docker folder found, pulling instead of cloning."; cd bitcart-docker;git pull;else echo "cloning bitcart-docker branch $1"; git clone -b "$1" https://github.com/BareBits/bitcart-docker.git;fi
-#if [ ! -d "bitcart-docker" ]; then echo "cloning bitcart-docker branch $1"; git clone -b "$1" https://github.com/BareBits/bitcart-docker.git; fi
-cd bitcart-docker
+BITCART_DOCKER_DIR="$(basename "$BITCART_DOCKER_REPO_URL" .git)"
+if [ -d "$BITCART_DOCKER_DIR" ]; then
+    echo "existing $BITCART_DOCKER_DIR folder found, pulling instead of cloning."
+    cd "$BITCART_DOCKER_DIR"
+    git fetch origin "$BITCART_DOCKER_REPO_BRANCH"
+    git checkout "$BITCART_DOCKER_REPO_BRANCH"
+    git pull --ff-only
+    cd ..
+else
+    echo "cloning $BITCART_DOCKER_REPO_URL @ $BITCART_DOCKER_REPO_BRANCH"
+    git clone -b "$BITCART_DOCKER_REPO_BRANCH" "$BITCART_DOCKER_REPO_URL" "$BITCART_DOCKER_DIR"
+fi
+cd "$BITCART_DOCKER_DIR"
 ./setup.sh
 cd ..
 
 # install liquidityhelper
 cd /opt
-if [ -d "liquidityhelper" ]; then echo "existing liquidityhelper folder found, pulling instead of cloning."; git pull; fi
-if [ ! -d "liquidityhelper" ]; then echo "cloning liquidityhelper branch $1"; git clone -b "$1" https://github.com/BareBits/bitcart_liquidity.git; fi
+LIQUIDITYHELPER_DIR="$(basename "$LIQUIDITYHELPER_REPO_URL" .git)"
+if [ -d "$LIQUIDITYHELPER_DIR" ]; then
+    echo "existing $LIQUIDITYHELPER_DIR folder found, pulling instead of cloning."
+    cd "$LIQUIDITYHELPER_DIR"
+    git pull --ff-only
+    cd ..
+else
+    echo "cloning $LIQUIDITYHELPER_REPO_URL @ $LIQUIDITYHELPER_REPO_BRANCH"
+    git clone -b "$LIQUIDITYHELPER_REPO_BRANCH" "$LIQUIDITYHELPER_REPO_URL" "$LIQUIDITYHELPER_DIR"
+fi
 
 # set variables
-cd bitcart_liquidity
+cd "$LIQUIDITYHELPER_DIR"
 touch user_config.py
 
 # manual variables
@@ -124,7 +173,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/deploy_bitcart_liquidity/run.sh
+ExecStart=/opt/deploy_bitcart_liquidity_lnd/run.sh
 
 # Restart behaviour
 Restart=always
@@ -157,11 +206,18 @@ echo "  View logs:    journalctl -u liquidityhelper -f"
 echo "  Disable:      systemctl disable liquidityhelper"
 
 
-# setup automatic docker updates
-mkdir -p ~/.local/bin/
-curl -L https://github.com/regclient/regclient/releases/latest/download/regctl-linux-amd64 > /usr/bin/regctl && chmod 775 /usr/bin/regctl && chmod +x /usr/bin/regctl
-wget -O ~/.local/bin/dockcheck.sh "https://raw.githubusercontent.com/mag37/dockcheck/main/dockcheck.sh" && chmod +x ~/.local/bin/dockcheck.sh
-echo "1 1 * * * ~/.local/bin/dockcheck.sh -af > /var/log/dockerupdates.log" > /etc/cron.d/docker_update
-echo "1 1 1 * * /opt/deploy_bitcart_liquidity/update_liquidityhelper.sh > /var/log/liquidityhelperupdate.log" > /etc/cron.d/docker_update
+# setup automatic updates.
+# bitcart-docker's update.sh git-pulls the source repos, runs
+# `docker compose pull` for non-source-built images (postgres, redis,
+# nginx, store, etc.), and then rebuilds the locally-tagged :stable
+# images via build-custom-images.sh. That single command covers
+# everything dockcheck would have done plus the source rebuild — no
+# separate dockcheck cron is needed.
+cat > /etc/cron.d/bitcart_updates <<EOF
+# Daily 01:30 UTC: pull non-source images and rebuild source images.
+30 1 * * * root cd /opt/$BITCART_DOCKER_DIR && ./update.sh > /var/log/bitcartupdate.log 2>&1
+# Monthly: refresh liquidityhelper from git
+1 1 1 * * root /opt/deploy_bitcart_liquidity_lnd/update_liquidityhelper.sh > /var/log/liquidityhelperupdate.log 2>&1
+EOF
 
 
