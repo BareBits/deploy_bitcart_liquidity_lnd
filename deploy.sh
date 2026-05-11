@@ -163,7 +163,13 @@ for var in $(compgen -v BITCART_); do
         continue
     fi
     # Write the key=value pair to the file
-    echo "${key}=${!var}" >> user_config.py
+    #echo "${key}='${!var}'" >> user_config.py
+    value=${!var}
+    if [[ $value =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+        printf "%s=%s\n" "$key" "$value" >> "user_config.py"
+    else
+        printf "%s='%s'\n" "$key" "$value" >> "user_config.py"
+    fi
 done
 
 python3 -m venv .venv
