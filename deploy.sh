@@ -9,6 +9,11 @@ set -e
 : "${BITCART_ADMIN_PASSWORD?Error: BITCART_ADMIN_PASSWORD environment variable is not set}"
 : "${CASHOUT_LIGHTNING_ADDRESS?Error: CASHOUT_LIGHTNING_ADDRESS environment variable is not set}"
 
+# Resolve this deploy checkout's directory NOW, before any `cd` below
+# changes the working directory. BASH_SOURCE[0] may be relative (e.g.
+# "./deploy.sh"), so it must be resolved from the original CWD.
+DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Some environment vars you need to set prior to calling the script
 # Critical settings, must be included
 #export BITCART_HOST=myhost.mywebsite.com
@@ -162,9 +167,7 @@ else
 fi
 PLUGIN_DIR="/opt/$LIQUIDITYHELPER_DIR"
 
-# Locate this deploy checkout so we can invoke sibling helper scripts
-# regardless of the current directory.
-DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# DEPLOY_DIR was resolved at the top of this script (before any cd).
 chmod +x "$DEPLOY_DIR/sync_plugin_code.sh" "$DEPLOY_DIR/update_liquidityhelper.sh"
 
 # Bake the plugin into bitcart-docker's compose/plugins tree (backend
