@@ -15,25 +15,50 @@ set -e
 #export BITCART_ADMIN_EMAIL=somebody@website.com
 #export BITCART_ADMIN_PASSWORD=mypassword
 
-# Required for email notificiations
-#export SMTP_SERVER=''
-#export SMTP_PORT=''
-#export SMTP_TLS='' # True or False
-#export SMTP_SSL='' # True or False
-#export SMTP_USERNAME=''
-#export SMTP_PASSWORD=''
+# Required for email notifications. These map onto the liquidity plugin's
+# SMTP_* settings (see the plugin env file built below).
+#export BITCART_SMTP_SERVER=''
+#export BITCART_SMTP_PORT=''
+#export BITCART_SMTP_TLS='' # TRUE or FALSE
+#export BITCART_SMTP_SSL='' # TRUE or FALSE
+#export BITCART_SMTP_USERNAME=''
+#export BITCART_SMTP_PASSWORD=''
+
+# git is needed immediately (branch probing + cloning the repos below).
+command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
+
+# --- Release channel / branch selection ------------------------------
+# BRANCH picks which line of development to deploy across ALL BareBits
+# forks: "main" (default — the stable pinned branches) or "testing".
+# When BRANCH=testing, each fork uses its own `testing` branch IF that
+# branch exists on that repo, otherwise it falls back to the repo's
+# default. This lets a testing branch exist on only some repos. Per-repo
+# *_REPO_BRANCH overrides set before this script still win.
+BRANCH="${BRANCH:-main}"
+
+resolve_branch() {
+    # resolve_branch <repo_url> <default_branch>
+    # Echoes "testing" when BRANCH=testing and the repo actually has a
+    # testing branch; otherwise echoes the default. Always returns 0.
+    local url="$1" default="$2"
+    if [ "$BRANCH" = "testing" ] && git ls-remote --heads "$url" testing 2>/dev/null | grep -q .; then
+        printf 'testing'
+    else
+        printf '%s' "$default"
+    fi
+}
 
 # Source repos for the bitcart-docker source-build path. Override any of
 # these to deploy from a different fork or branch. Note: the SDK source
 # is pinned in the bitcart fork's pyproject.toml, not here.
 : "${BITCART_REPO_URL:=https://github.com/BareBits/bitcart.git}"
-: "${BITCART_REPO_BRANCH:=lnd-integration}"
+: "${BITCART_REPO_BRANCH:=$(resolve_branch "$BITCART_REPO_URL" lnd-integration)}"
 : "${BITCART_ADMIN_REPO_URL:=https://github.com/BareBits/bitcart-admin.git}"
-: "${BITCART_ADMIN_REPO_BRANCH:=lnd-integration}"
+: "${BITCART_ADMIN_REPO_BRANCH:=$(resolve_branch "$BITCART_ADMIN_REPO_URL" lnd-integration)}"
 : "${BITCART_DOCKER_REPO_URL:=https://github.com/BareBits/bitcart-docker-lnd.git}"
-: "${BITCART_DOCKER_REPO_BRANCH:=master}"
+: "${BITCART_DOCKER_REPO_BRANCH:=$(resolve_branch "$BITCART_DOCKER_REPO_URL" master)}"
 : "${LIQUIDITYHELPER_REPO_URL:=https://github.com/BareBits/bitcart_liquidity.git}"
-: "${LIQUIDITYHELPER_REPO_BRANCH:=main}"
+: "${LIQUIDITYHELPER_REPO_BRANCH:=$(resolve_branch "$LIQUIDITYHELPER_REPO_URL" main)}"
 export BITCART_REPO_URL BITCART_REPO_BRANCH
 export BITCART_ADMIN_REPO_URL BITCART_ADMIN_REPO_BRANCH
 
@@ -42,7 +67,10 @@ export BITCART_ADMIN_REPO_URL BITCART_ADMIN_REPO_BRANCH
 export BITCART_SOURCE_BUILD=true
 
 # Coin daemons. btc = electrum-based, btclnd = LND neutrino-based.
-# Both run alongside each other.
+# Both run alongside each other. The liquidity plugin auto-prefers the
+# LND (btclnd) wallet whenever Bitcart advertises it (it does here), so
+# no wallet-type setting is needed — see the plugin's
+# _detect_preferred_wallet_currency().
 export BITCART_CRYPTOS=btc,btclnd
 export BTC_LIGHTNING=True
 export BTC_LIGHTNING_LISTEN=0.0.0.0:9735
@@ -77,12 +105,6 @@ export BTCLND_NETWORK BTCLND_DEBUG BTCLND_TOR BTCLND_NEUTRINO_PEERS
 export BTCLND_LND_EXTRA_ARGS BTCLND_EXTERNAL_IP BTCLND_LND_BINARY
 export BTCLND_BASE_P2P_PORT
 
-export SMTP_FROM_EMAIL=$BITCART_ADMIN_EMAIL
-export SMTP_TO_EMAIL=$BITCART_ADMIN_EMAIL
-
-chmod +x run.sh
-chmod +x update_liquidityhelper.sh
-
 # enable automatic updates
 apt install unattended-upgrades -y
 echo unattended-upgrades unattended-upgrades/enable_auto_updates boolean true | debconf-set-selections
@@ -102,9 +124,13 @@ ufw allow "$BTCLND_BASE_P2P_PORT:$BTCLND_P2P_PORT_RANGE_END/tcp"
 ufw deny 5000/tcp
 ufw reload
 
-# install bitcart
+# install prerequisites
 apt-get update && apt-get install -y git htop iotop python3-venv rsync
 mkdir -p /opt
+
+# clone or update bitcart-docker. We do NOT build yet — the liquidity
+# plugin is baked into compose/plugins below first, then setup.sh builds
+# everything in one pass.
 cd /opt
 BITCART_DOCKER_DIR="$(basename "$BITCART_DOCKER_REPO_URL" .git)"
 if [ -d "$BITCART_DOCKER_DIR" ]; then
@@ -118,126 +144,107 @@ else
     echo "cloning $BITCART_DOCKER_REPO_URL @ $BITCART_DOCKER_REPO_BRANCH"
     git clone -b "$BITCART_DOCKER_REPO_BRANCH" "$BITCART_DOCKER_REPO_URL" "$BITCART_DOCKER_DIR"
 fi
-cd "$BITCART_DOCKER_DIR"
-./setup.sh
-cd ..
+DOCKER_DIR="/opt/$BITCART_DOCKER_DIR"
 
-# install liquidityhelper
+# clone or update the liquidity plugin source
 cd /opt
 LIQUIDITYHELPER_DIR="$(basename "$LIQUIDITYHELPER_REPO_URL" .git)"
-if [ -d "$LIQUIDITYHELPER_DIR" ]; then
-    echo "existing $LIQUIDITYHELPER_DIR folder found, pulling instead of cloning."
+if [ -d "$LIQUIDITYHELPER_DIR/.git" ]; then
+    echo "existing $LIQUIDITYHELPER_DIR found, pulling @ $LIQUIDITYHELPER_REPO_BRANCH"
     cd "$LIQUIDITYHELPER_DIR"
+    git fetch origin "$LIQUIDITYHELPER_REPO_BRANCH"
+    git checkout "$LIQUIDITYHELPER_REPO_BRANCH"
     git pull --ff-only
     cd ..
 else
     echo "cloning $LIQUIDITYHELPER_REPO_URL @ $LIQUIDITYHELPER_REPO_BRANCH"
     git clone -b "$LIQUIDITYHELPER_REPO_BRANCH" "$LIQUIDITYHELPER_REPO_URL" "$LIQUIDITYHELPER_DIR"
 fi
+PLUGIN_DIR="/opt/$LIQUIDITYHELPER_DIR"
 
-# set variables
-cd "$LIQUIDITYHELPER_DIR"
-touch user_config.py
+# Locate this deploy checkout so we can invoke sibling helper scripts
+# regardless of the current directory.
+DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+chmod +x "$DEPLOY_DIR/sync_plugin_code.sh" "$DEPLOY_DIR/update_liquidityhelper.sh"
 
-# manual variables
-echo "SMTP_TO_EMAIL='$BITCART_ADMIN_EMAIL'">>user_config.py
-echo "SMTP_FROM_EMAIL='$BITCART_ADMIN_EMAIL'">>user_config.py
+# Bake the plugin into bitcart-docker's compose/plugins tree (backend
+# engine + admin Vue module) so setup.sh builds it into the images.
+"$DEPLOY_DIR/sync_plugin_code.sh" "$PLUGIN_DIR" "$DOCKER_DIR"
 
-if [[ "$BITCART_SMTP_SSL" == "TRUE" ]]; then
-    echo "SMTP_SSL=True">>user_config.py
-else
-    echo "SMTP_SSL=False">>user_config.py
-fi
-if [[ "$BITCART_SMTP_TLS" == "TRUE" ]]; then
-    echo "SMTP_TLS=True">>user_config.py
-else
-    echo "SMTP_TLS=False">>user_config.py
-fi
+# Plugin runtime config, delivered as LIQUIDITYHELPER_*-prefixed env vars
+# loaded into the backend + worker containers via the auto-discovered
+# docker component written below. config.py reads these (the prefix is
+# required) with precedence: plugin-UI > env > user_config.py > defaults.
+# On a fresh install the plugin also bootstraps the first Bitcart admin
+# from ADMIN_EMAIL/ADMIN_PASSWORD.
+lh_bool() { case "${1^^}" in TRUE|1|YES|ON) printf True;; *) printf False;; esac; }
+LH_ENV_FILE="$DOCKER_DIR/compose/liquidityhelper.env"
+{
+    printf 'LIQUIDITYHELPER_CASHOUT_LIGHTNING_ADDRESS=%s\n' "$CASHOUT_LIGHTNING_ADDRESS"
+    printf 'LIQUIDITYHELPER_ADMIN_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
+    printf 'LIQUIDITYHELPER_ADMIN_PASSWORD=%s\n' "$BITCART_ADMIN_PASSWORD"
+    printf 'LIQUIDITYHELPER_SMTP_FROM_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
+    printf 'LIQUIDITYHELPER_SMTP_TO_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
+    [ -n "${BITCART_SMTP_SERVER:-}" ]   && printf 'LIQUIDITYHELPER_SMTP_SERVER=%s\n' "$BITCART_SMTP_SERVER"
+    [ -n "${BITCART_SMTP_PORT:-}" ]     && printf 'LIQUIDITYHELPER_SMTP_PORT=%s\n' "$BITCART_SMTP_PORT"
+    [ -n "${BITCART_SMTP_USERNAME:-}" ] && printf 'LIQUIDITYHELPER_SMTP_USERNAME=%s\n' "$BITCART_SMTP_USERNAME"
+    [ -n "${BITCART_SMTP_PASSWORD:-}" ] && printf 'LIQUIDITYHELPER_SMTP_PASSWORD=%s\n' "$BITCART_SMTP_PASSWORD"
+    printf 'LIQUIDITYHELPER_SMTP_TLS=%s\n' "$(lh_bool "${BITCART_SMTP_TLS:-}")"
+    printf 'LIQUIDITYHELPER_SMTP_SSL=%s\n' "$(lh_bool "${BITCART_SMTP_SSL:-}")"
+} > "$LH_ENV_FILE"
+chmod 600 "$LH_ENV_FILE"
 
-# automatic vars:
-skip=("BITCART_SMTP_TLS" "BITCART_SMTP_SSL") # skip these vars
-for var in $(compgen -v BITCART_); do
-    # Strip the BITCART_ prefix from the variable name
-    key="${var#BITCART_}"
-    if [[ " ${skip[*]} " == *" ${var} "* ]]; then
-        continue
-    fi
-    # Write the key=value pair to the file
-    #echo "${key}='${!var}'" >> user_config.py
-    value=${!var}
-    if [[ $value =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-        printf "%s=%s\n" "$key" "$value" >> "user_config.py"
-    else
-        printf "%s='%s'\n" "$key" "$value" >> "user_config.py"
-    fi
-done
+# Auto-discovered compose component: bitcart-docker's generator scans
+# compose/plugins/docker/*/components/*.yml and merges them into the
+# generated compose. This one attaches the env file above to the backend
+# and worker services. The env_file path is relative to the generated
+# compose file (compose/generated.yml), i.e. compose/liquidityhelper.env.
+LH_COMPONENT_DIR="$DOCKER_DIR/compose/plugins/docker/liquidityhelper/components"
+mkdir -p "$LH_COMPONENT_DIR"
+cat > "$LH_COMPONENT_DIR/liquidityhelper.yml" <<'YML'
+# Injects the liquidityhelper plugin's runtime settings (written by
+# deploy.sh to compose/liquidityhelper.env) into the backend and worker
+# containers. Auto-merged into compose/generated.yml by bitcart-docker's
+# generator (get_plugin_components).
+services:
+  backend:
+    env_file:
+      - liquidityhelper.env
+  worker:
+    env_file:
+      - liquidityhelper.env
+YML
 
-python3 -m venv .venv
-source .venv/bin/activate
-which python
-pip install -r requirements.txt
-
-# setup automatic run of liquidityhelper
-set -euo pipefail
-
-UNIT_FILE="/etc/systemd/system/liquidityhelper.service"
-
-echo "Creating systemd unit file at ${UNIT_FILE}..."
-
-cat > "${UNIT_FILE}" << 'EOF'
-[Unit]
-Description=LiquidityHelper
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/opt/deploy_bitcart_liquidity_lnd/run.sh
-
-# Restart behaviour
-Restart=always
-RestartSec=60
-
-# Give up after 10 retries (StartLimitBurst) within a 700s window
-# Window = RestartSec * (StartLimitBurst + 1) = 60 * 11 = 660s, using 700s for headroom
-StartLimitIntervalSec=700
-StartLimitBurst=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-echo "Reloading systemd daemon..."
-systemctl daemon-reload
-echo "Waiting for bitcart to start..."
-sleep 60
-echo "Enabling service to start at boot..."
-systemctl enable liquidityhelper.service
-systemctl start liquidityhelper.service
-
-echo ""
-echo "Done. Service 'liquidityhelper' is installed and enabled."
-echo ""
-echo "Useful commands:"
-echo "  Start now:    systemctl start liquidityhelper"
-echo "  Check status: systemctl status liquidityhelper"
-echo "  View logs:    journalctl -u liquidityhelper -f"
-echo "  Disable:      systemctl disable liquidityhelper"
-
+# Build + start bitcart with the plugin baked in.
+cd "$DOCKER_DIR"
+./setup.sh
+cd /opt
 
 # setup automatic updates.
 # bitcart-docker's update.sh git-pulls the source repos, runs
 # `docker compose pull` for non-source-built images (postgres, redis,
-# nginx, store, etc.), and then rebuilds the locally-tagged :stable
-# images via build-custom-images.sh. That single command covers
-# everything dockcheck would have done plus the source rebuild — no
-# separate dockcheck cron is needed.
+# nginx, store, etc.), and rebuilds the locally-tagged :stable images via
+# build-custom-images.sh.
+# update_liquidityhelper.sh refreshes the plugin source first, but is
+# commit-gated: it only re-syncs into compose/plugins when the plugin
+# repo actually moved. The subsequent update.sh then rebuilds the
+# plugin's backend image and — only when the admin files changed — the
+# admin image (yarn build), via bitcart-docker's plugin hash-diff. So an
+# unchanged plugin adds no rebuild cost.
 cat > /etc/cron.d/bitcart_updates <<EOF
-# Daily 01:30 UTC: pull non-source images and rebuild source images.
-30 1 * * * root cd /opt/$BITCART_DOCKER_DIR && ./update.sh > /var/log/bitcartupdate.log 2>&1
-# Monthly: refresh liquidityhelper from git
-1 1 1 * * root /opt/deploy_bitcart_liquidity_lnd/update_liquidityhelper.sh > /var/log/liquidityhelperupdate.log 2>&1
+# Daily 01:30 UTC: refresh the liquidity plugin (commit-gated), then
+# update bitcart (which rebuilds the plugin images when the re-sync
+# changed them).
+30 1 * * * root $DEPLOY_DIR/update_liquidityhelper.sh >> /var/log/liquidityhelperupdate.log 2>&1 && cd $DOCKER_DIR && ./update.sh >> /var/log/bitcartupdate.log 2>&1
 EOF
 
-
+echo ""
+echo "Done. Bitcart is deployed with the liquidityhelper plugin baked in."
+echo ""
+echo "  Admin UI:        https://$BITCART_HOST/  (Plugins -> liquidityhelper)"
+echo "  Plugin settings: $LH_ENV_FILE  (LIQUIDITYHELPER_* env)"
+echo "  Daily updates:   /etc/cron.d/bitcart_updates"
+echo ""
+echo "Useful commands:"
+echo "  Backend logs:    docker logs -f \$(docker ps -qf name=backend)"
+echo "  Refresh plugin:  $DEPLOY_DIR/update_liquidityhelper.sh && (cd $DOCKER_DIR && ./update.sh)"
