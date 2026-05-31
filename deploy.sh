@@ -170,8 +170,23 @@ PLUGIN_DIR="/opt/$LIQUIDITYHELPER_DIR"
 # DEPLOY_DIR was resolved at the top of this script (before any cd).
 chmod +x "$DEPLOY_DIR/sync_plugin_code.sh" "$DEPLOY_DIR/update_liquidityhelper.sh"
 
-# Bake the plugin into bitcart-docker's compose/plugins tree (backend
-# engine + admin Vue module) so setup.sh builds it into the images.
+# Build + start the base bitcart stack FIRST, with an empty
+# compose/plugins tree. setup.sh records the current (empty) plugin hash
+# in .deploy; the plugin is layered on AFTER, so bitcart-docker's
+# install_plugins sees a changed compose/plugins hash and actually bakes
+# it. If the plugin is already present before setup.sh, setup.sh's early
+# save_deploy_config records the populated hash, install_plugins (run by
+# start.sh, a fresh process that re-reads .deploy) finds no change, and
+# the plugin layer is silently skipped.
+cd "$DOCKER_DIR"
+./setup.sh
+
+# Bake the plugin in: sync the engine + admin module into compose/plugins,
+# write the runtime env file + the compose component that wires it into
+# the backend + worker containers, then regenerate compose and start.
+# start.sh -> install_plugins now sees the changed plugin hash and builds
+# the backend (engine) and admin (Vue) plugin layers on top of the base
+# images, then restarts. No source rebuild — this is the fast path.
 "$DEPLOY_DIR/sync_plugin_code.sh" "$PLUGIN_DIR" "$DOCKER_DIR"
 
 # Plugin runtime config, delivered as LIQUIDITYHELPER_*-prefixed env vars
@@ -218,9 +233,11 @@ services:
       - liquidityhelper.env
 YML
 
-# Build + start bitcart with the plugin baked in.
-cd "$DOCKER_DIR"
-./setup.sh
+# Regenerate the compose (now including the env-file component) and start.
+# install_plugins bakes the plugin layers because the compose/plugins hash
+# now differs from the clean setup above.
+./build.sh
+./start.sh
 cd /opt
 
 # setup automatic updates.
