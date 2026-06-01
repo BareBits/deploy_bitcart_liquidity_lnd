@@ -210,6 +210,22 @@ LH_ENV_FILE="$DOCKER_DIR/compose/liquidityhelper.env"
     printf 'LIQUIDITYHELPER_SMTP_TLS=%s\n' "$(lh_bool "${BITCART_SMTP_TLS:-}")"
     printf 'LIQUIDITYHELPER_SMTP_SSL=%s\n' "$(lh_bool "${BITCART_SMTP_SSL:-}")"
 } > "$LH_ENV_FILE"
+
+# Forward any operator-set LIQUIDITYHELPER_*-prefixed env vars verbatim so
+# the single-line installer (or an operator) can configure ANY plugin
+# setting at deploy time — config.py applies them as settings overrides.
+# The deploy itself sets NO liquidity mode, so a bare deploy leaves the
+# plugin in its default (liquidity management disabled); the documented
+# single-line command opts into automatic channel management by exporting
+# LIQUIDITYHELPER_LIQUIDITY_DISABLED=False +
+# LIQUIDITYHELPER_AUTOMATIC_CHANNEL_CREATION_ENABLED=True. Exclude the
+# deploy's own repo-pin vars, which are not plugin settings.
+while IFS= read -r _lhvar; do
+    case "$_lhvar" in
+        LIQUIDITYHELPER_REPO_URL|LIQUIDITYHELPER_REPO_BRANCH) continue ;;
+    esac
+    printf '%s=%s\n' "$_lhvar" "${!_lhvar}" >> "$LH_ENV_FILE"
+done < <(compgen -e | grep '^LIQUIDITYHELPER_' || true)
 chmod 600 "$LH_ENV_FILE"
 
 # Auto-discovered compose component: bitcart-docker's generator scans
