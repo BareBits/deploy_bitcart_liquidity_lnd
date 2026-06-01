@@ -1,7 +1,7 @@
 # deploy_bitcart_liquidity_lnd
 
 A shell script that deploys [Bitcart](https://bitcart.ai) (with the LND
-wallet) plus the [Bitcart Liquidity Helper](https://github.com/BareBits/bitcart_liquidity)
+wallet) plus the [Bitcart Liquidity Helper](https://github.com/BareBits/bitcart_liquidity_lnd)
 **as a Bitcart plugin** to a fresh bare-metal server or VPS, in one command.
 
 The liquidity helper runs *inside* Bitcart (it is no longer a standalone
