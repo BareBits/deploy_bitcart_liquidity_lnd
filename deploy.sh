@@ -263,9 +263,12 @@ cd /opt
 # fails. The plugin retries this on its own (bitcart_liquidity_lnd), but
 # we also (a) wait here so the deploy doesn't return on a half-started
 # stack, and (b) as a fallback — e.g. an older plugin build without the
-# retry — restart the worker+backend once the API is up so the bootstrap
-# runs cleanly. The token row (app_id=plugin:liquidityhelper) is the
-# signal that the admin + token were created.
+# retry — restart the WORKER ONLY once the API is up so the bootstrap
+# re-runs against the (already-up) backend. We deliberately do not restart
+# the backend too: that would put the backend back into its not-ready
+# window and re-create the very race we're recovering from. The token row
+# (app_id=plugin:liquidityhelper) is the signal that the admin + token
+# were created.
 echo "Waiting for the backend API to accept connections..."
 api_ready=false
 for _ in $(seq 1 60); do
@@ -289,8 +292,24 @@ if [ "$api_ready" = true ]; then
     if [ "$token_present" = true ]; then
         echo "Plugin bootstrapped (admin user + token present)."
     else
-        echo "Plugin token still absent — restarting worker + backend to re-run the bootstrap against the ready API."
-        docker restart "$(docker ps -qf name=worker)" "$(docker ps -qf name=backend)" >/dev/null 2>&1 || true
+        echo "Plugin token still absent — restarting the worker only (backend stays up) to re-run the bootstrap against the ready API."
+        docker restart "$(docker ps -qf name=worker)" >/dev/null 2>&1 || true
+        # The worker re-runs worker_setup on start; with the backend already
+        # accepting connections the bootstrap now succeeds. Wait for the
+        # token so the SMTP step below has an admin to authenticate as.
+        for _ in $(seq 1 24); do  # up to ~2 min
+            if [ "$(docker exec "$db_cid" psql -U postgres -d bitcart -tAc \
+                    "select 1 from tokens where app_id='plugin:liquidityhelper' limit 1" \
+                    2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+                token_present=true; break
+            fi
+            sleep 5
+        done
+        if [ "$token_present" = true ]; then
+            echo "Plugin bootstrapped (admin user + token present)."
+        else
+            echo "WARNING: plugin token still absent after a worker restart. The admin may need a manual 'docker restart \$(docker ps -qf name=worker)' once the backend is fully up — check 'docker logs \$(docker ps -qf name=worker)'."
+        fi
     fi
 else
     echo "WARNING: backend API did not come up within the wait window. The plugin may need a manual restart once it does — check 'docker logs \$(docker ps -qf name=backend)'."
@@ -314,7 +333,7 @@ if [ -n "${BITCART_SMTP_SERVER:-}" ] && [ -n "${BITCART_SMTP_USERNAME:-}" ] && [
     # settling, e.g. after a restart above).
     _tok=""
     for _ in $(seq 1 12); do
-        _tok=$(curl -s -X POST http://localhost/api/token \
+        _tok=$(curl -s --max-time 15 -X POST http://localhost/api/token \
             -H 'Content-Type: application/json' \
             -d "$(python3 -c "import json,os; print(json.dumps({'email':os.environ['BITCART_ADMIN_EMAIL'],'password':os.environ['BITCART_ADMIN_PASSWORD'],'permissions':['full_control']}))")" \
             2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token') or d.get('id') or '')" 2>/dev/null)
@@ -323,7 +342,7 @@ if [ -n "${BITCART_SMTP_SERVER:-}" ] && [ -n "${BITCART_SMTP_USERNAME:-}" ] && [
     done
     if [ -n "$_tok" ]; then
         _payload=$(python3 -c "import json,os; print(json.dumps({'email_settings':{'host':os.environ['BITCART_SMTP_SERVER'],'port':int(os.environ.get('BITCART_SMTP_PORT') or 587),'user':os.environ['BITCART_SMTP_USERNAME'],'password':os.environ['BITCART_SMTP_PASSWORD'],'address':os.environ['_SMTP_FROM'],'auth_mode':os.environ['_SMTP_MODE']}}))")
-        _code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/api/manage/policies \
+        _code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST http://localhost/api/manage/policies \
             -H 'Content-Type: application/json' -H "Authorization: Bearer $_tok" -d "$_payload")
         if [ "$_code" = "200" ]; then
             echo "Bitcart installation-wide SMTP configured."
