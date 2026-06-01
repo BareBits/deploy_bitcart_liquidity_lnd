@@ -12,7 +12,7 @@
 # Usage: update_liquidityhelper.sh [plugin_src_dir] [bitcart_docker_dir]
 set -euo pipefail
 
-PLUGIN_DIR="${1:-/opt/bitcart_liquidity}"
+PLUGIN_DIR="${1:-/opt/bitcart_liquidity_lnd}"
 DOCKER_DIR="${2:-/opt/bitcart-docker-lnd}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

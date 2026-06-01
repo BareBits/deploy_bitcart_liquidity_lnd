@@ -4,7 +4,7 @@
 # admin images. Idempotent; safe to re-run.
 #
 # Usage: sync_plugin_code.sh <plugin_src_dir> <bitcart_docker_dir>
-#   plugin_src_dir      e.g. /opt/bitcart_liquidity
+#   plugin_src_dir      e.g. /opt/bitcart_liquidity_lnd
 #   bitcart_docker_dir  e.g. /opt/bitcart-docker-lnd
 set -euo pipefail
 

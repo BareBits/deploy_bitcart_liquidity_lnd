@@ -62,7 +62,7 @@ resolve_branch() {
 : "${BITCART_ADMIN_REPO_BRANCH:=$(resolve_branch "$BITCART_ADMIN_REPO_URL" lnd-integration)}"
 : "${BITCART_DOCKER_REPO_URL:=https://github.com/BareBits/bitcart-docker-lnd.git}"
 : "${BITCART_DOCKER_REPO_BRANCH:=$(resolve_branch "$BITCART_DOCKER_REPO_URL" master)}"
-: "${LIQUIDITYHELPER_REPO_URL:=https://github.com/BareBits/bitcart_liquidity.git}"
+: "${LIQUIDITYHELPER_REPO_URL:=https://github.com/BareBits/bitcart_liquidity_lnd.git}"
 : "${LIQUIDITYHELPER_REPO_BRANCH:=$(resolve_branch "$LIQUIDITYHELPER_REPO_URL" main)}"
 export BITCART_REPO_URL BITCART_REPO_BRANCH
 export BITCART_ADMIN_REPO_URL BITCART_ADMIN_REPO_BRANCH
@@ -271,7 +271,7 @@ cat > /etc/cron.d/bitcart_updates <<EOF
 # Daily 01:30 UTC: refresh the liquidity plugin (commit-gated), then
 # update bitcart (which rebuilds the plugin images when the re-sync
 # changed them).
-30 1 * * * root $DEPLOY_DIR/update_liquidityhelper.sh >> /var/log/liquidityhelperupdate.log 2>&1 && cd $DOCKER_DIR && ./update.sh >> /var/log/bitcartupdate.log 2>&1
+30 1 * * * root $DEPLOY_DIR/update_liquidityhelper.sh "$PLUGIN_DIR" "$DOCKER_DIR" >> /var/log/liquidityhelperupdate.log 2>&1 && cd $DOCKER_DIR && ./update.sh >> /var/log/bitcartupdate.log 2>&1
 EOF
 
 echo ""
@@ -283,4 +283,4 @@ echo "  Daily updates:   /etc/cron.d/bitcart_updates"
 echo ""
 echo "Useful commands:"
 echo "  Backend logs:    docker logs -f \$(docker ps -qf name=backend)"
-echo "  Refresh plugin:  $DEPLOY_DIR/update_liquidityhelper.sh && (cd $DOCKER_DIR && ./update.sh)"
+echo "  Refresh plugin:  $DEPLOY_DIR/update_liquidityhelper.sh $PLUGIN_DIR $DOCKER_DIR && (cd $DOCKER_DIR && ./update.sh)"
