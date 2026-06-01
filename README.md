@@ -23,12 +23,12 @@ export BITCART_HOST='somehost.com'
 export BITCART_ADMIN_EMAIL='office@somehost.com'
 # no quote characters allowed
 export BITCART_ADMIN_PASSWORD='mybhjhgffd789!!'
-export BITCART_SMTP_SERVER='mail.getbarebits.com'
-export BITCART_SMTP_PORT='587'
-export BITCART_SMTP_TLS='TRUE'
-export BITCART_SMTP_SSL=''
-export BITCART_SMTP_USERNAME='test@getbarebits.com'
-export BITCART_SMTP_PASSWORD='somepassword'
+export LIQUIDITYHELPER_SMTP_SERVER='mail.getbarebits.com'
+export LIQUIDITYHELPER_SMTP_PORT='587'
+export LIQUIDITYHELPER_SMTP_TLS='TRUE'
+export LIQUIDITYHELPER_SMTP_SSL=''
+export LIQUIDITYHELPER_SMTP_USERNAME='test@getbarebits.com'
+export LIQUIDITYHELPER_SMTP_PASSWORD='somepassword'
 export CASHOUT_LIGHTNING_ADDRESS='cashout@mywebsite.com'
 # Liquidity management mode. These two enable AUTOMATIC channel
 # management. Omit both to leave liquidity management disabled (the repo
@@ -51,13 +51,16 @@ deploy repo has no `testing` branch yet.
 
 ## How config reaches the plugin
 
-The `BITCART_*` / `CASHOUT_LIGHTNING_ADDRESS` variables above are mapped to
-`LIQUIDITYHELPER_*`-prefixed settings and written to
-`compose/liquidityhelper.env` in the bitcart-docker checkout, which a
-generated compose component loads into the backend + worker containers.
-On a fresh install the plugin bootstraps the first Bitcart admin from
-`ADMIN_EMAIL` / `ADMIN_PASSWORD`. Anything left unset can be edited later
-in the plugin's **Settings** tab (plugin UI overrides win over env).
+Plugin settings are written to `compose/liquidityhelper.env` in the
+bitcart-docker checkout, which a generated compose component loads into the
+backend + worker containers. `BITCART_ADMIN_EMAIL` / `BITCART_ADMIN_PASSWORD`
+and `CASHOUT_LIGHTNING_ADDRESS` are mapped to their `LIQUIDITYHELPER_*`
+settings (and the SMTP notification From/To default to the admin email); on
+a fresh install the plugin bootstraps the first Bitcart admin from those
+credentials. Everything else — SMTP, liquidity mode, etc. — is set by
+exporting the `LIQUIDITYHELPER_*` var directly (see below). Anything left
+unset can be edited later in the plugin's **Settings** tab (plugin UI
+overrides win over env).
 
 In addition, **any `LIQUIDITYHELPER_*`-prefixed environment variable** you
 export is forwarded verbatim into that env file, so you can set *any*
