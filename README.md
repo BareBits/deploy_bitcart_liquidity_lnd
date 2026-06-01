@@ -30,6 +30,12 @@ export BITCART_SMTP_SSL=''
 export BITCART_SMTP_USERNAME='test@getbarebits.com'
 export BITCART_SMTP_PASSWORD='somepassword'
 export CASHOUT_LIGHTNING_ADDRESS='cashout@mywebsite.com'
+# Liquidity management mode. These two enable AUTOMATIC channel
+# management. Omit both to leave liquidity management disabled (the repo
+# default) and pick a mode later in the plugin's dashboard. Any
+# LIQUIDITYHELPER_*-prefixed var here is forwarded as a plugin setting.
+export LIQUIDITYHELPER_LIQUIDITY_DISABLED='False'
+export LIQUIDITYHELPER_AUTOMATIC_CHANNEL_CREATION_ENABLED='True'
 export BRANCH='main'
 cd /opt; apt install -yy git \
   && { git clone -b "$BRANCH" https://github.com/BareBits/deploy_bitcart_liquidity_lnd.git \
@@ -52,6 +58,15 @@ generated compose component loads into the backend + worker containers.
 On a fresh install the plugin bootstraps the first Bitcart admin from
 `ADMIN_EMAIL` / `ADMIN_PASSWORD`. Anything left unset can be edited later
 in the plugin's **Settings** tab (plugin UI overrides win over env).
+
+In addition, **any `LIQUIDITYHELPER_*`-prefixed environment variable** you
+export is forwarded verbatim into that env file, so you can set *any*
+plugin setting at deploy time — e.g. the liquidity mode shown in the
+single-line command above. The deploy script itself sets no mode, so
+running it without those vars leaves liquidity management **disabled** (the
+plugin is installed but idle); the single-line command opts into automatic
+channel management via `LIQUIDITYHELPER_LIQUIDITY_DISABLED=False` +
+`LIQUIDITYHELPER_AUTOMATIC_CHANNEL_CREATION_ENABLED=True`.
 
 ## Updates
 

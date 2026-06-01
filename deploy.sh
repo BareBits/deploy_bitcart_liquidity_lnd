@@ -9,6 +9,11 @@ set -e
 : "${BITCART_ADMIN_PASSWORD?Error: BITCART_ADMIN_PASSWORD environment variable is not set}"
 : "${CASHOUT_LIGHTNING_ADDRESS?Error: CASHOUT_LIGHTNING_ADDRESS environment variable is not set}"
 
+# Resolve this deploy checkout's directory NOW, before any `cd` below
+# changes the working directory. BASH_SOURCE[0] may be relative (e.g.
+# "./deploy.sh"), so it must be resolved from the original CWD.
+DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Some environment vars you need to set prior to calling the script
 # Critical settings, must be included
 #export BITCART_HOST=myhost.mywebsite.com
@@ -162,13 +167,26 @@ else
 fi
 PLUGIN_DIR="/opt/$LIQUIDITYHELPER_DIR"
 
-# Locate this deploy checkout so we can invoke sibling helper scripts
-# regardless of the current directory.
-DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# DEPLOY_DIR was resolved at the top of this script (before any cd).
 chmod +x "$DEPLOY_DIR/sync_plugin_code.sh" "$DEPLOY_DIR/update_liquidityhelper.sh"
 
-# Bake the plugin into bitcart-docker's compose/plugins tree (backend
-# engine + admin Vue module) so setup.sh builds it into the images.
+# Build + start the base bitcart stack FIRST, with an empty
+# compose/plugins tree. setup.sh records the current (empty) plugin hash
+# in .deploy; the plugin is layered on AFTER, so bitcart-docker's
+# install_plugins sees a changed compose/plugins hash and actually bakes
+# it. If the plugin is already present before setup.sh, setup.sh's early
+# save_deploy_config records the populated hash, install_plugins (run by
+# start.sh, a fresh process that re-reads .deploy) finds no change, and
+# the plugin layer is silently skipped.
+cd "$DOCKER_DIR"
+./setup.sh
+
+# Bake the plugin in: sync the engine + admin module into compose/plugins,
+# write the runtime env file + the compose component that wires it into
+# the backend + worker containers, then regenerate compose and start.
+# start.sh -> install_plugins now sees the changed plugin hash and builds
+# the backend (engine) and admin (Vue) plugin layers on top of the base
+# images, then restarts. No source rebuild — this is the fast path.
 "$DEPLOY_DIR/sync_plugin_code.sh" "$PLUGIN_DIR" "$DOCKER_DIR"
 
 # Plugin runtime config, delivered as LIQUIDITYHELPER_*-prefixed env vars
@@ -192,6 +210,22 @@ LH_ENV_FILE="$DOCKER_DIR/compose/liquidityhelper.env"
     printf 'LIQUIDITYHELPER_SMTP_TLS=%s\n' "$(lh_bool "${BITCART_SMTP_TLS:-}")"
     printf 'LIQUIDITYHELPER_SMTP_SSL=%s\n' "$(lh_bool "${BITCART_SMTP_SSL:-}")"
 } > "$LH_ENV_FILE"
+
+# Forward any operator-set LIQUIDITYHELPER_*-prefixed env vars verbatim so
+# the single-line installer (or an operator) can configure ANY plugin
+# setting at deploy time — config.py applies them as settings overrides.
+# The deploy itself sets NO liquidity mode, so a bare deploy leaves the
+# plugin in its default (liquidity management disabled); the documented
+# single-line command opts into automatic channel management by exporting
+# LIQUIDITYHELPER_LIQUIDITY_DISABLED=False +
+# LIQUIDITYHELPER_AUTOMATIC_CHANNEL_CREATION_ENABLED=True. Exclude the
+# deploy's own repo-pin vars, which are not plugin settings.
+while IFS= read -r _lhvar; do
+    case "$_lhvar" in
+        LIQUIDITYHELPER_REPO_URL|LIQUIDITYHELPER_REPO_BRANCH) continue ;;
+    esac
+    printf '%s=%s\n' "$_lhvar" "${!_lhvar}" >> "$LH_ENV_FILE"
+done < <(compgen -e | grep '^LIQUIDITYHELPER_' || true)
 chmod 600 "$LH_ENV_FILE"
 
 # Auto-discovered compose component: bitcart-docker's generator scans
@@ -215,9 +249,11 @@ services:
       - liquidityhelper.env
 YML
 
-# Build + start bitcart with the plugin baked in.
-cd "$DOCKER_DIR"
-./setup.sh
+# Regenerate the compose (now including the env-file component) and start.
+# install_plugins bakes the plugin layers because the compose/plugins hash
+# now differs from the clean setup above.
+./build.sh
+./start.sh
 cd /opt
 
 # setup automatic updates.
