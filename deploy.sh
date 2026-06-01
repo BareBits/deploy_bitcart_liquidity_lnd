@@ -20,14 +20,14 @@ DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #export BITCART_ADMIN_EMAIL=somebody@website.com
 #export BITCART_ADMIN_PASSWORD=mypassword
 
-# Required for email notifications. These map onto the liquidity plugin's
-# SMTP_* settings (see the plugin env file built below).
-#export BITCART_SMTP_SERVER=''
-#export BITCART_SMTP_PORT=''
-#export BITCART_SMTP_TLS='' # TRUE or FALSE
-#export BITCART_SMTP_SSL='' # TRUE or FALSE
-#export BITCART_SMTP_USERNAME=''
-#export BITCART_SMTP_PASSWORD=''
+# Required for email notifications. These are liquidity-plugin settings,
+# forwarded verbatim into the plugin (config.py parses the types).
+#export LIQUIDITYHELPER_SMTP_SERVER=''
+#export LIQUIDITYHELPER_SMTP_PORT=''
+#export LIQUIDITYHELPER_SMTP_TLS='' # TRUE or FALSE
+#export LIQUIDITYHELPER_SMTP_SSL='' # TRUE or FALSE
+#export LIQUIDITYHELPER_SMTP_USERNAME=''
+#export LIQUIDITYHELPER_SMTP_PASSWORD=''
 
 # git is needed immediately (branch probing + cloning the repos below).
 command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
@@ -195,7 +195,12 @@ cd "$DOCKER_DIR"
 # required) with precedence: plugin-UI > env > user_config.py > defaults.
 # On a fresh install the plugin also bootstraps the first Bitcart admin
 # from ADMIN_EMAIL/ADMIN_PASSWORD.
-lh_bool() { case "${1^^}" in TRUE|1|YES|ON) printf True;; *) printf False;; esac; }
+#
+# SMTP and any other plugin settings are configured by exporting their
+# LIQUIDITYHELPER_* vars in the installer — they are forwarded verbatim by
+# the loop below, and config.py parses the types (e.g. SMTP_TLS=TRUE -> bool,
+# SMTP_PORT=587 -> int). The notification From/To addresses default to the
+# admin email here; override with LIQUIDITYHELPER_SMTP_FROM_EMAIL/_TO_EMAIL.
 LH_ENV_FILE="$DOCKER_DIR/compose/liquidityhelper.env"
 {
     printf 'LIQUIDITYHELPER_CASHOUT_LIGHTNING_ADDRESS=%s\n' "$CASHOUT_LIGHTNING_ADDRESS"
@@ -203,12 +208,6 @@ LH_ENV_FILE="$DOCKER_DIR/compose/liquidityhelper.env"
     printf 'LIQUIDITYHELPER_ADMIN_PASSWORD=%s\n' "$BITCART_ADMIN_PASSWORD"
     printf 'LIQUIDITYHELPER_SMTP_FROM_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
     printf 'LIQUIDITYHELPER_SMTP_TO_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
-    [ -n "${BITCART_SMTP_SERVER:-}" ]   && printf 'LIQUIDITYHELPER_SMTP_SERVER=%s\n' "$BITCART_SMTP_SERVER"
-    [ -n "${BITCART_SMTP_PORT:-}" ]     && printf 'LIQUIDITYHELPER_SMTP_PORT=%s\n' "$BITCART_SMTP_PORT"
-    [ -n "${BITCART_SMTP_USERNAME:-}" ] && printf 'LIQUIDITYHELPER_SMTP_USERNAME=%s\n' "$BITCART_SMTP_USERNAME"
-    [ -n "${BITCART_SMTP_PASSWORD:-}" ] && printf 'LIQUIDITYHELPER_SMTP_PASSWORD=%s\n' "$BITCART_SMTP_PASSWORD"
-    printf 'LIQUIDITYHELPER_SMTP_TLS=%s\n' "$(lh_bool "${BITCART_SMTP_TLS:-}")"
-    printf 'LIQUIDITYHELPER_SMTP_SSL=%s\n' "$(lh_bool "${BITCART_SMTP_SSL:-}")"
 } > "$LH_ENV_FILE"
 
 # Forward any operator-set LIQUIDITYHELPER_*-prefixed env vars verbatim so
