@@ -20,14 +20,17 @@ DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #export BITCART_ADMIN_EMAIL=somebody@website.com
 #export BITCART_ADMIN_PASSWORD=mypassword
 
-# Required for email notifications. These are liquidity-plugin settings,
-# forwarded verbatim into the plugin (config.py parses the types).
-#export LIQUIDITYHELPER_SMTP_SERVER=''
-#export LIQUIDITYHELPER_SMTP_PORT=''
-#export LIQUIDITYHELPER_SMTP_TLS='' # TRUE or FALSE
-#export LIQUIDITYHELPER_SMTP_SSL='' # TRUE or FALSE
-#export LIQUIDITYHELPER_SMTP_USERNAME=''
-#export LIQUIDITYHELPER_SMTP_PASSWORD=''
+# Email notifications. These set Bitcart's installation-wide SMTP (Server
+# Management -> Policies); the liquidity plugin then notifies store owners
+# through Bitcart's own email. Set the address with BITCART_SMTP_FROM_EMAIL
+# (defaults to BITCART_SMTP_USERNAME).
+#export BITCART_SMTP_SERVER=''
+#export BITCART_SMTP_PORT=''
+#export BITCART_SMTP_TLS='' # TRUE or FALSE (STARTTLS)
+#export BITCART_SMTP_SSL='' # TRUE or FALSE (implicit SSL/TLS)
+#export BITCART_SMTP_USERNAME=''
+#export BITCART_SMTP_PASSWORD=''
+#export BITCART_SMTP_FROM_EMAIL=''
 
 # git is needed immediately (branch probing + cloning the repos below).
 command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
@@ -196,18 +199,17 @@ cd "$DOCKER_DIR"
 # On a fresh install the plugin also bootstraps the first Bitcart admin
 # from ADMIN_EMAIL/ADMIN_PASSWORD.
 #
-# SMTP and any other plugin settings are configured by exporting their
+# Non-SMTP plugin settings are configured by exporting their
 # LIQUIDITYHELPER_* vars in the installer — they are forwarded verbatim by
-# the loop below, and config.py parses the types (e.g. SMTP_TLS=TRUE -> bool,
-# SMTP_PORT=587 -> int). The notification From/To addresses default to the
-# admin email here; override with LIQUIDITYHELPER_SMTP_FROM_EMAIL/_TO_EMAIL.
+# the loop below, and config.py parses the types. SMTP is NOT a plugin
+# setting anymore: the plugin notifies store owners through Bitcart's own
+# installation-wide SMTP, which the post-start step below sets from
+# BITCART_SMTP_*.
 LH_ENV_FILE="$DOCKER_DIR/compose/liquidityhelper.env"
 {
     printf 'LIQUIDITYHELPER_CASHOUT_LIGHTNING_ADDRESS=%s\n' "$CASHOUT_LIGHTNING_ADDRESS"
     printf 'LIQUIDITYHELPER_ADMIN_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
     printf 'LIQUIDITYHELPER_ADMIN_PASSWORD=%s\n' "$BITCART_ADMIN_PASSWORD"
-    printf 'LIQUIDITYHELPER_SMTP_FROM_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
-    printf 'LIQUIDITYHELPER_SMTP_TO_EMAIL=%s\n' "$BITCART_ADMIN_EMAIL"
 } > "$LH_ENV_FILE"
 
 # Forward any operator-set LIQUIDITYHELPER_*-prefixed env vars verbatim so
@@ -292,6 +294,45 @@ if [ "$api_ready" = true ]; then
     fi
 else
     echo "WARNING: backend API did not come up within the wait window. The plugin may need a manual restart once it does — check 'docker logs \$(docker ps -qf name=backend)'."
+fi
+
+# --- Bitcart installation-wide SMTP -----------------------------------
+# Set Bitcart's server Policy email settings from BITCART_SMTP_*, so the
+# whole installation — and the liquidity plugin's store-owner
+# notifications — can send email. Done over the API as the admin; the POST
+# merges (only email_settings is changed). Skipped if BITCART_SMTP_* aren't
+# provided. JSON is built with python3 to escape values safely.
+if [ -n "${BITCART_SMTP_SERVER:-}" ] && [ -n "${BITCART_SMTP_USERNAME:-}" ] && [ -n "${BITCART_SMTP_PASSWORD:-}" ]; then
+    echo "Configuring Bitcart installation-wide SMTP (server policy)..."
+    # auth_mode: implicit SSL takes precedence over STARTTLS; neither -> none.
+    _smtp_mode=none
+    case "${BITCART_SMTP_TLS:-}" in TRUE|true|1|YES|yes|ON|on) _smtp_mode=starttls ;; esac
+    case "${BITCART_SMTP_SSL:-}" in TRUE|true|1|YES|yes|ON|on) _smtp_mode=ssl/tls ;; esac
+    export _SMTP_MODE="$_smtp_mode"
+    export _SMTP_FROM="${BITCART_SMTP_FROM_EMAIL:-$BITCART_SMTP_USERNAME}"
+    # Get a full_control admin token (retry — the API/admin may still be
+    # settling, e.g. after a restart above).
+    _tok=""
+    for _ in $(seq 1 12); do
+        _tok=$(curl -s -X POST http://localhost/api/token \
+            -H 'Content-Type: application/json' \
+            -d "$(python3 -c "import json,os; print(json.dumps({'email':os.environ['BITCART_ADMIN_EMAIL'],'password':os.environ['BITCART_ADMIN_PASSWORD'],'permissions':['full_control']}))")" \
+            2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token') or d.get('id') or '')" 2>/dev/null)
+        [ -n "$_tok" ] && break
+        sleep 5
+    done
+    if [ -n "$_tok" ]; then
+        _payload=$(python3 -c "import json,os; print(json.dumps({'email_settings':{'host':os.environ['BITCART_SMTP_SERVER'],'port':int(os.environ.get('BITCART_SMTP_PORT') or 587),'user':os.environ['BITCART_SMTP_USERNAME'],'password':os.environ['BITCART_SMTP_PASSWORD'],'address':os.environ['_SMTP_FROM'],'auth_mode':os.environ['_SMTP_MODE']}}))")
+        _code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/api/manage/policies \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $_tok" -d "$_payload")
+        if [ "$_code" = "200" ]; then
+            echo "Bitcart installation-wide SMTP configured."
+        else
+            echo "WARNING: setting the Bitcart SMTP policy returned HTTP $_code. Configure it in Server Management -> Policies."
+        fi
+    else
+        echo "WARNING: could not obtain an admin token; Bitcart SMTP policy not set. Configure it in Server Management -> Policies."
+    fi
 fi
 
 # setup automatic updates.

@@ -23,12 +23,14 @@ export BITCART_HOST='somehost.com'
 export BITCART_ADMIN_EMAIL='office@somehost.com'
 # no quote characters allowed
 export BITCART_ADMIN_PASSWORD='mybhjhgffd789!!'
-export LIQUIDITYHELPER_SMTP_SERVER='mail.getbarebits.com'
-export LIQUIDITYHELPER_SMTP_PORT='587'
-export LIQUIDITYHELPER_SMTP_TLS='TRUE'
-export LIQUIDITYHELPER_SMTP_SSL=''
-export LIQUIDITYHELPER_SMTP_USERNAME='test@getbarebits.com'
-export LIQUIDITYHELPER_SMTP_PASSWORD='somepassword'
+# SMTP for the whole Bitcart installation (Server Management -> Policies);
+# the liquidity plugin notifies store owners through Bitcart's email.
+export BITCART_SMTP_SERVER='mail.getbarebits.com'
+export BITCART_SMTP_PORT='587'
+export BITCART_SMTP_TLS='TRUE'
+export BITCART_SMTP_SSL=''
+export BITCART_SMTP_USERNAME='test@getbarebits.com'
+export BITCART_SMTP_PASSWORD='somepassword'
 export CASHOUT_LIGHTNING_ADDRESS='cashout@mywebsite.com'
 # Liquidity management mode. These two enable AUTOMATIC channel
 # management. Omit both to leave liquidity management disabled (the repo
@@ -55,12 +57,17 @@ Plugin settings are written to `compose/liquidityhelper.env` in the
 bitcart-docker checkout, which a generated compose component loads into the
 backend + worker containers. `BITCART_ADMIN_EMAIL` / `BITCART_ADMIN_PASSWORD`
 and `CASHOUT_LIGHTNING_ADDRESS` are mapped to their `LIQUIDITYHELPER_*`
-settings (and the SMTP notification From/To default to the admin email); on
-a fresh install the plugin bootstraps the first Bitcart admin from those
-credentials. Everything else — SMTP, liquidity mode, etc. — is set by
-exporting the `LIQUIDITYHELPER_*` var directly (see below). Anything left
-unset can be edited later in the plugin's **Settings** tab (plugin UI
-overrides win over env).
+settings; on a fresh install the plugin bootstraps the first Bitcart admin
+from those credentials. Anything left unset can be edited later in the
+plugin's **Settings** tab (plugin UI overrides win over env).
+
+**Email is not a plugin setting.** The `BITCART_SMTP_*` vars configure
+Bitcart's **installation-wide** SMTP (Server Management → Policies) via the
+API after the stack is up; the liquidity plugin then sends its
+notifications to the relevant **store owner** through Bitcart's own email.
+`auth_mode` is derived from `BITCART_SMTP_TLS`/`_SSL` (STARTTLS / implicit
+SSL / none); the From address is `BITCART_SMTP_FROM_EMAIL` (default
+`BITCART_SMTP_USERNAME`).
 
 In addition, **any `LIQUIDITYHELPER_*`-prefixed environment variable** you
 export is forwarded verbatim into that env file, so you can set *any*
