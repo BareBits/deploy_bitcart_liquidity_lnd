@@ -256,6 +256,45 @@ YML
 ./start.sh
 cd /opt
 
+# --- Post-start settle ------------------------------------------------
+# On first boot the plugin's startup/worker hooks can run before the
+# backend gunicorn is accepting connections, so the admin/token bootstrap
+# fails. The plugin retries this on its own (bitcart_liquidity_lnd), but
+# we also (a) wait here so the deploy doesn't return on a half-started
+# stack, and (b) as a fallback — e.g. an older plugin build without the
+# retry — restart the worker+backend once the API is up so the bootstrap
+# runs cleanly. The token row (app_id=plugin:liquidityhelper) is the
+# signal that the admin + token were created.
+echo "Waiting for the backend API to accept connections..."
+api_ready=false
+for _ in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost/api/cryptos 2>/dev/null)" = "200" ]; then
+        api_ready=true; break
+    fi
+    sleep 5
+done
+if [ "$api_ready" = true ]; then
+    echo "Backend API is up; waiting for the plugin to bootstrap the admin + token..."
+    db_cid="$(docker ps -qf name=database)"
+    token_present=false
+    for _ in $(seq 1 24); do  # up to ~2 min
+        if [ "$(docker exec "$db_cid" psql -U postgres -d bitcart -tAc \
+                "select 1 from tokens where app_id='plugin:liquidityhelper' limit 1" \
+                2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+            token_present=true; break
+        fi
+        sleep 5
+    done
+    if [ "$token_present" = true ]; then
+        echo "Plugin bootstrapped (admin user + token present)."
+    else
+        echo "Plugin token still absent — restarting worker + backend to re-run the bootstrap against the ready API."
+        docker restart "$(docker ps -qf name=worker)" "$(docker ps -qf name=backend)" >/dev/null 2>&1 || true
+    fi
+else
+    echo "WARNING: backend API did not come up within the wait window. The plugin may need a manual restart once it does — check 'docker logs \$(docker ps -qf name=backend)'."
+fi
+
 # setup automatic updates.
 # bitcart-docker's update.sh git-pulls the source repos, runs
 # `docker compose pull` for non-source-built images (postgres, redis,
