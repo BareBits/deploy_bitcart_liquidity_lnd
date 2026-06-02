@@ -44,6 +44,20 @@ command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
 # *_REPO_BRANCH overrides set before this script still win.
 BRANCH="${BRANCH:-main}"
 
+# --- Deployment name (multi-instance) --------------------------------
+# DEPLOY_NAME lets several Bitcart deployments coexist on one host. When
+# set it names the docker compose project (via setup.sh --name) plus this
+# script's per-instance docker checkout, container lookups, and cron file.
+# When empty (default) behaviour is unchanged: a single instance managed
+# by systemd. NAME_PREFIX matches the container-name prefix compose uses
+# for a named project (e.g. "<name>-backend-1").
+DEPLOY_NAME="${DEPLOY_NAME:-}"
+NAME_PREFIX="${DEPLOY_NAME:+${DEPLOY_NAME}-}"
+# Reverse proxy mode (setup.sh's default is nginx-https). Read here so the
+# post-start API base URL matches how the API is exposed — with no bundled
+# nginx (BITCART_REVERSEPROXY=none) the backend is reached directly.
+REVERSEPROXY="${BITCART_REVERSEPROXY:-nginx-https}"
+
 resolve_branch() {
     # resolve_branch <repo_url> <default_branch>
     # Echoes "testing" when BRANCH=testing and the repo actually has a
@@ -112,6 +126,13 @@ export BTCLND_P2P_PORT_RANGE_END=$((BTCLND_BASE_P2P_PORT + BTCLND_P2P_POOL_SIZE 
 export BTCLND_NETWORK BTCLND_DEBUG BTCLND_TOR BTCLND_NEUTRINO_PEERS
 export BTCLND_LND_EXTRA_ARGS BTCLND_EXTERNAL_IP BTCLND_LND_BINARY
 export BTCLND_BASE_P2P_PORT
+# gRPC port pool, sized to match the p2p pool. Exported with its range end
+# so a named instance can pick a non-colliding base; the generated
+# compose's gRPC port mapping derives from these. (Previously only the
+# p2p base/range was exported, so a custom gRPC base did not take effect.)
+: "${BTCLND_BASE_GRPC_PORT:=10009}"
+export BTCLND_GRPC_PORT_RANGE_END=$((BTCLND_BASE_GRPC_PORT + BTCLND_P2P_POOL_SIZE - 1))
+export BTCLND_BASE_GRPC_PORT
 
 # enable automatic updates
 apt install unattended-upgrades -y
@@ -140,7 +161,7 @@ mkdir -p /opt
 # plugin is baked into compose/plugins below first, then setup.sh builds
 # everything in one pass.
 cd /opt
-BITCART_DOCKER_DIR="$(basename "$BITCART_DOCKER_REPO_URL" .git)"
+BITCART_DOCKER_DIR="$(basename "$BITCART_DOCKER_REPO_URL" .git)${DEPLOY_NAME:+-$DEPLOY_NAME}"
 if [ -d "$BITCART_DOCKER_DIR" ]; then
     echo "existing $BITCART_DOCKER_DIR folder found, pulling instead of cloning."
     cd "$BITCART_DOCKER_DIR"
@@ -182,7 +203,13 @@ chmod +x "$DEPLOY_DIR/sync_plugin_code.sh" "$DEPLOY_DIR/update_liquidityhelper.s
 # start.sh, a fresh process that re-reads .deploy) finds no change, and
 # the plugin layer is silently skipped.
 cd "$DOCKER_DIR"
-./setup.sh
+if [ -n "$DEPLOY_NAME" ]; then
+    # Named deployment: own compose project, no systemd — lifecycle is
+    # managed by the caller (e.g. an orchestrator / docker compose).
+    ./setup.sh --name "$DEPLOY_NAME" --no-startup-register
+else
+    ./setup.sh
+fi
 
 # Bake the plugin in: sync the engine + admin module into compose/plugins,
 # write the runtime env file + the compose component that wires it into
@@ -269,17 +296,26 @@ cd /opt
 # window and re-create the very race we're recovering from. The token row
 # (app_id=plugin:liquidityhelper) is the signal that the admin + token
 # were created.
+# API base for the post-start steps. With an external/no reverse proxy the
+# public nginx (port 80) is absent, so talk to the backend directly — its
+# API is served WITHOUT the /api prefix that nginx adds in front.
+if [ "$REVERSEPROXY" = "nginx" ] || [ "$REVERSEPROXY" = "nginx-https" ]; then
+    API_BASE="http://localhost/api"
+else
+    API_BASE="http://localhost:${BITCART_BACKEND_PORT:-8000}"
+fi
+
 echo "Waiting for the backend API to accept connections..."
 api_ready=false
 for _ in $(seq 1 60); do
-    if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost/api/cryptos 2>/dev/null)" = "200" ]; then
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$API_BASE/cryptos" 2>/dev/null)" = "200" ]; then
         api_ready=true; break
     fi
     sleep 5
 done
 if [ "$api_ready" = true ]; then
     echo "Backend API is up; waiting for the plugin to bootstrap the admin + token..."
-    db_cid="$(docker ps -qf name=database)"
+    db_cid="$(docker ps -qf name=${NAME_PREFIX}database)"
     token_present=false
     for _ in $(seq 1 24); do  # up to ~2 min
         if [ "$(docker exec "$db_cid" psql -U postgres -d bitcart -tAc \
@@ -293,7 +329,7 @@ if [ "$api_ready" = true ]; then
         echo "Plugin bootstrapped (admin user + token present)."
     else
         echo "Plugin token still absent — restarting the worker only (backend stays up) to re-run the bootstrap against the ready API."
-        docker restart "$(docker ps -qf name=worker)" >/dev/null 2>&1 || true
+        docker restart "$(docker ps -qf name=${NAME_PREFIX}worker)" >/dev/null 2>&1 || true
         # The worker re-runs worker_setup on start; with the backend already
         # accepting connections the bootstrap now succeeds. Wait for the
         # token so the SMTP step below has an admin to authenticate as.
@@ -333,7 +369,7 @@ if [ -n "${BITCART_SMTP_SERVER:-}" ] && [ -n "${BITCART_SMTP_USERNAME:-}" ] && [
     # settling, e.g. after a restart above).
     _tok=""
     for _ in $(seq 1 12); do
-        _tok=$(curl -s --max-time 15 -X POST http://localhost/api/token \
+        _tok=$(curl -s --max-time 15 -X POST "$API_BASE/token" \
             -H 'Content-Type: application/json' \
             -d "$(python3 -c "import json,os; print(json.dumps({'email':os.environ['BITCART_ADMIN_EMAIL'],'password':os.environ['BITCART_ADMIN_PASSWORD'],'permissions':['full_control']}))")" \
             2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token') or d.get('id') or '')" 2>/dev/null)
@@ -342,7 +378,7 @@ if [ -n "${BITCART_SMTP_SERVER:-}" ] && [ -n "${BITCART_SMTP_USERNAME:-}" ] && [
     done
     if [ -n "$_tok" ]; then
         _payload=$(python3 -c "import json,os; print(json.dumps({'email_settings':{'host':os.environ['BITCART_SMTP_SERVER'],'port':int(os.environ.get('BITCART_SMTP_PORT') or 587),'user':os.environ['BITCART_SMTP_USERNAME'],'password':os.environ['BITCART_SMTP_PASSWORD'],'address':os.environ['_SMTP_FROM'],'auth_mode':os.environ['_SMTP_MODE']}}))")
-        _code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST http://localhost/api/manage/policies \
+        _code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST "$API_BASE/manage/policies" \
             -H 'Content-Type: application/json' -H "Authorization: Bearer $_tok" -d "$_payload")
         if [ "$_code" = "200" ]; then
             echo "Bitcart installation-wide SMTP configured."
@@ -365,7 +401,7 @@ fi
 # plugin's backend image and — only when the admin files changed — the
 # admin image (yarn build), via bitcart-docker's plugin hash-diff. So an
 # unchanged plugin adds no rebuild cost.
-cat > /etc/cron.d/bitcart_updates <<EOF
+cat > "/etc/cron.d/bitcart_updates${DEPLOY_NAME:+_$DEPLOY_NAME}" <<EOF
 # Daily 01:30 UTC: refresh the liquidity plugin (commit-gated), then
 # update bitcart (which rebuilds the plugin images when the re-sync
 # changed them).
@@ -380,5 +416,5 @@ echo "  Plugin settings: $LH_ENV_FILE  (LIQUIDITYHELPER_* env)"
 echo "  Daily updates:   /etc/cron.d/bitcart_updates"
 echo ""
 echo "Useful commands:"
-echo "  Backend logs:    docker logs -f \$(docker ps -qf name=backend)"
+echo "  Backend logs:    docker logs -f \$(docker ps -qf name=${NAME_PREFIX}backend)"
 echo "  Refresh plugin:  $DEPLOY_DIR/update_liquidityhelper.sh $PLUGIN_DIR $DOCKER_DIR && (cd $DOCKER_DIR && ./update.sh)"
