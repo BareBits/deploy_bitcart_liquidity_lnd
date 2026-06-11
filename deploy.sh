@@ -391,21 +391,28 @@ if [ -n "${BITCART_SMTP_SERVER:-}" ] && [ -n "${BITCART_SMTP_USERNAME:-}" ] && [
 fi
 
 # setup automatic updates.
-# bitcart-docker's update.sh git-pulls the source repos, runs
-# `docker compose pull` for non-source-built images (postgres, redis,
-# nginx, store, etc.), and rebuilds the locally-tagged :stable images via
-# build-custom-images.sh.
-# update_liquidityhelper.sh refreshes the plugin source first, but is
-# commit-gated: it only re-syncs into compose/plugins when the plugin
-# repo actually moved. The subsequent update.sh then rebuilds the
-# plugin's backend image and — only when the admin files changed — the
-# admin image (yarn build), via bitcart-docker's plugin hash-diff. So an
-# unchanged plugin adds no rebuild cost.
+# update_liquidityhelper.sh is now the single orchestrator: it gates on
+# the plugin's AUTO_UPDATE_ENABLED setting (OFF by default — operators opt
+# in via LIQUIDITYHELPER_AUTO_UPDATE_ENABLED=true), tracks the configured
+# channel (main/testing), and when enabled it syncs the plugin, runs
+# bitcart-docker's update.sh (which git-pulls source repos, `docker
+# compose pull`s base images, and rebuilds the locally-tagged :stable
+# images including the plugin), then HEALTH-CHECKS the plugin via its
+# /health endpoint and ROLLS BACK + bans the release if it fails to start.
+# It single-flights via a lockfile and is commit-gated, so an unchanged
+# plugin adds no rebuild cost. We pass BITCART_HOST so it can reach
+# /health. (The chained `&& ./update.sh` is gone — the orchestrator owns
+# the rebuild so it can health-gate and roll it back.)
+#
+# NOTE: with auto-updates OFF (the default) the cron does nothing — the
+# plugin still surfaces "update available" in the dashboard + emails the
+# operator. This means bitcart-core updates also pause until an operator
+# enables auto-updates; that is the intended "no surprise rebuilds"
+# posture for a fund-moving node.
 cat > "/etc/cron.d/bitcart_updates${DEPLOY_NAME:+_$DEPLOY_NAME}" <<EOF
-# Daily 01:30 UTC: refresh the liquidity plugin (commit-gated), then
-# update bitcart (which rebuilds the plugin images when the re-sync
-# changed them).
-30 1 * * * root $DEPLOY_DIR/update_liquidityhelper.sh "$PLUGIN_DIR" "$DOCKER_DIR" >> /var/log/liquidityhelperupdate.log 2>&1 && cd $DOCKER_DIR && ./update.sh >> /var/log/bitcartupdate.log 2>&1
+# Daily 01:30 UTC: gated, health-checked, self-rolling-back plugin+core
+# update. No-op unless LIQUIDITYHELPER_AUTO_UPDATE_ENABLED=true.
+30 1 * * * root $DEPLOY_DIR/update_liquidityhelper.sh "$PLUGIN_DIR" "$DOCKER_DIR" "$BITCART_HOST" >> /var/log/liquidityhelperupdate.log 2>&1
 EOF
 
 echo ""
@@ -417,4 +424,5 @@ echo "  Daily updates:   /etc/cron.d/bitcart_updates"
 echo ""
 echo "Useful commands:"
 echo "  Backend logs:    docker logs -f \$(docker ps -qf name=${NAME_PREFIX}backend)"
-echo "  Refresh plugin:  $DEPLOY_DIR/update_liquidityhelper.sh $PLUGIN_DIR $DOCKER_DIR && (cd $DOCKER_DIR && ./update.sh)"
+echo "  Run update now:  $DEPLOY_DIR/update_liquidityhelper.sh $PLUGIN_DIR $DOCKER_DIR $BITCART_HOST"
+echo "  Enable auto-upd: add LIQUIDITYHELPER_AUTO_UPDATE_ENABLED=true to $LH_ENV_FILE (or set in the plugin UI)"
