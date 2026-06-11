@@ -78,10 +78,50 @@ plugin is installed but idle); the single-line command opts into automatic
 channel management via `LIQUIDITYHELPER_LIQUIDITY_DISABLED=False` +
 `LIQUIDITYHELPER_AUTOMATIC_CHANNEL_CREATION_ENABLED=True`.
 
-## Updates
+## Automatic updates
 
-A daily cron (`/etc/cron.d/bitcart_updates`) refreshes the plugin source
-(commit-gated — it only re-syncs when the plugin repo actually moved) and
-then runs bitcart-docker's `update.sh`, which rebuilds the plugin's backend
-image and, only when its admin (Vue) files changed, the admin image
-(`yarn build`).
+A daily cron (`/etc/cron.d/bitcart_updates`, 01:30 UTC) runs
+`update_liquidityhelper.sh`, a self-contained, health-gated updater that
+runs entirely on the host — outside the containers — so a broken plugin
+release can't stop it from fetching the next one.
+
+**Off by default.** It does nothing unless auto-updates are enabled
+(`AUTO_UPDATE_ENABLED` in the plugin UI, or
+`LIQUIDITYHELPER_AUTO_UPDATE_ENABLED=true`). While off, the plugin still
+shows an "update available" banner in its dashboard and emails the site
+operator — but nothing is applied, and bitcart-core updates pause too, so a
+fund-moving node never gets a surprise rebuild. Enable it to opt in.
+
+When enabled, each run:
+
+1. Reads the effective on/off + channel (`main`/`testing`) from the
+   plugin's `/health` endpoint, falling back to `compose/liquidityhelper.env`.
+2. Fetches the channel branch; skips any commit on the **ban-list** (a
+   release that previously failed to start) — only a newer, non-banned
+   commit is applied.
+3. Syncs the plugin and rebuilds via bitcart-docker's `update.sh`
+   (commit-gated — an unchanged plugin adds no rebuild cost).
+4. **Health-checks** the result via `/health` (the worker tick loop must
+   actually come up). If the new release fails to start, it **bans** that
+   commit and **rolls back** to the previous good one, then rebuilds.
+
+State lives in `update_state/` (`banned`, `last_result`, `update.lock`).
+
+### Adding auto-updates to an existing bitcart-docker install
+
+If you already run bitcart-docker and installed the plugin the normal way
+(uploaded the `.bitcartcc` in the admin UI) — i.e. you did **not** use
+`deploy.sh` — you can add the updater with the standalone installer. It only
+sets up the update machinery (clones the plugin source + this repo into
+`/opt`, installs the cron) and changes nothing about your running stack;
+auto-updates stay off until you enable them.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BareBits/deploy_bitcart_liquidity_lnd/main/install_updater.sh \
+  | sudo bash -s -- --docker-dir /opt/bitcart-docker --host pay.example.com
+```
+
+`--docker-dir` and `--host` are autodetected when omitted (host from the
+bitcart-docker `.env`). `--channel testing` and `--name <suffix>` (for
+multiple instances on one host) are also supported. Re-running it updates
+the clones + cron in place.
